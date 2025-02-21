@@ -1,0 +1,143 @@
+  - name: Install CW monitoring tool playbook
+    hosts: webserver
+    become: true
+    tasks:
+      - name: Install CloudWatch monitoring tool
+        get_url:
+          url: https://amazoncloudwatch-agent.s3.amazonaws.com/redhat/amd64/latest/amazon-cloudwatch-agent.rpm
+          dest: ./amazon-cloudwatch-agent.rpm
+          mode: '0644'
+
+      #- name: Use command module to run RPM
+      #  command:
+      #    cmd: rpm -U ./amazon-cloudwatch-agent.rpm
+
+      - name: Create directory
+        file:
+          path: /opt/aws/amazon-cloudwatch-agent/etc/
+          state: directory
+ 
+      - name: Configure CloudWatch Agent
+        copy:
+          dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          content: |
+            {
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/apache2/access.log",
+                        "log_group_name": "apache-logs",
+                        "log_stream_name": "access-log"
+                      },
+                      {
+                        "file_path": "/var/log/apache2/error.log",
+                        "log_group_name": "apache-logs",
+                        "log_stream_name": "error-log"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+
+      - name: Start CloudWatch Agent
+        service:
+          name: amazon-cloudwatch-agent
+          state: started
+          enabled: yes
+
+      - name: Install and configure firewall
+        dnf:
+          name: firewalld
+          state: absent
+
+      #- name: Allow  port 16788
+      #  firewalld:
+      #    port: 22
+      #    permanent: true
+      #    state: enabled 
+
+      #- name: Allow  port 16788
+      #  firewalld:
+      #    port: 16788/tcp
+      #    permanent: true
+      #    state: enabled
+
+
+      - name: Install Apache and PHP
+        dnf:
+          name:
+            - httpd
+            - php
+          state: present
+
+      #- name: Ensure Apache modules are enabled
+      #  command: a2enmod proxy proxy_http
+
+      - name: Change Apache listening port
+        lineinfile:
+          path: /etc/httpd/conf/httpd.conf
+          regexp: '^Listen '
+          line: 'Listen 16788'
+
+      #- name: Enable PHP OpCache
+      #  lineinfile:
+      #    path: /etc/php/{{ php_version }}/apache2/php.ini
+      #    line: "{{ item }}"
+      #    create: yes
+     #   with_items:
+       #   - "opcache.enable=1"
+       #   - "opcache.memory_consumption=128"
+       #   - "opcache.max_accelerated_files=4000"
+       #   - "opcache.revalidate_freq=2"
+
+      - name: Deploy PHP API
+        copy:
+          dest: /var/www/html/index.php
+          content: |
+            <?php
+            if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+                $input = file_get_contents('php://input');
+                parse_str($input, $data);
+                if (!empty($data['words'])) {
+                    $words = explode(',', $data['words']);
+                    sort($words);
+                    echo json_encode($words);
+                }
+            } else {
+                echo '<form method="POST" onsubmit="fetchSorted(event)">
+                        <input type="text" id="wordInput" name="words" placeholder="Enter comma-separated words">
+                        <button type="submit">Sort</button>
+                      </form>
+                      <div id="output"></div>
+                      <script>
+                        function fetchSorted(event) {
+                            event.preventDefault();
+                            let words = document.getElementById("wordInput").value;
+                            fetch("", {method: "POST", body: "words=" + words, headers: {'Content-Type': 'application/x-www-form-urlencoded'}})
+                                .then(response => response.json())
+                                .then(data => document.getElementById("output").innerText = data.join(", "));
+                        }
+                      </script>';
+            }
+            ?>
+
+      - name: Configure Apache Proxy
+        copy:
+          dest: /etc/httpd/conf/000-default.conf
+          content: |
+            <VirtualHost *:16788>
+                ServerAdmin webmaster@localhost
+                DocumentRoot /var/www/html
+                ProxyPass /api http://127.0.0.1/index.php
+                ProxyPassReverse /api http://127.0.0.1/index.php
+                ErrorLog ${APACHE_LOG_DIR}/error.log
+                CustomLog ${APACHE_LOG_DIR}/access.log combined
+            </VirtualHost>
+
+      - name: Restart Apache
+        systemd:
+          name: httpd
+          state: restarted
